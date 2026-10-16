@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Belousov-Zhabotinsky Reaction Canvas</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; }
+  input[type=range] { accent-color: #06b6d4; }
+</style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center p-4">
+<h1 class="text-2xl font-bold text-cyan-400 mb-1">Belousov-Zhabotinsky Reaction Canvas</h1>
+<p class="text-gray-400 text-sm mb-4">化学振動反応（BZ反応）の螺旋波・ターゲット波シミュレーション</p>
+
+<div class="flex flex-col lg:flex-row gap-6 w-full max-w-5xl">
+  <!-- Canvas -->
+  <div class="flex flex-col items-center">
+    <canvas id="bzCanvas" width="400" height="400"
+      class="border border-gray-700 rounded cursor-crosshair"
+      aria-label="BZ反応シミュレーションキャンバス。クリックで興奮中心を追加"></canvas>
+    <div class="flex gap-4 mt-2 text-sm text-gray-400">
+      <span id="fpsDisplay">FPS: --</span>
+      <span id="stepDisplay">Step: 0</span>
+      <span>200×200 grid</span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="flex flex-col gap-4 min-w-64">
+    <!-- Parameters -->
+    <div class="bg-gray-800 rounded-lg p-4">
+      <h2 class="text-cyan-300 font-semibold mb-3">パラメータ</h2>
+
+      <label class="block text-sm mb-1">
+        ε (励起時定数): <span id="epsilonVal" class="text-yellow-300">0.10</span>
+      </label>
+      <input type="range" id="epsilon" min="0.01" max="0.5" step="0.01" value="0.10"
+        class="w-full mb-3" aria-label="epsilon: 励起時定数">
+
+      <label class="block text-sm mb-1">
+        f (化学量論係数): <span id="fVal" class="text-yellow-300">1.40</span>
+      </label>
+      <input type="range" id="fParam" min="1.0" max="3.0" step="0.05" value="1.40"
+        class="w-full mb-3" aria-label="f: 化学量論係数">
+
+      <label class="block text-sm mb-1">
+        D_v/D_u (拡散比): <span id="diffVal" class="text-yellow-300">0.60</span>
+      </label>
+      <input type="range" id="diffRatio" min="0.1" max="1.0" step="0.05" value="0.60"
+        class="w-full mb-3" aria-label="拡散比 D_v/D_u">
+
+      <label class="block text-sm mb-1">
+        速度 (steps/frame): <span id="speedVal" class="text-yellow-300">3</span>
+      </label>
+      <input type="range" id="speed" min="1" max="10" step="1" value="3"
+        class="w-full" aria-label="シミュレーション速度">
+    </div>
+
+    <!-- Buttons -->
+    <div class="flex gap-2">
+      <button id="resetBtn"
+        class="flex-1 bg-cyan-700 hover:bg-cyan-600 text-white py-2 px-4 rounded font-semibold transition-colors"
+        aria-label="シミュレーションをリセット">
+        Reset
+      </button>
+      <button id="pauseBtn"
+        class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 px-4 rounded font-semibold transition-colors"
+        aria-label="一時停止/再開">
+        Pause
+      </button>
+    </div>
+
+    <!-- Colormap legend -->
+    <div class="bg-gray-800 rounded-lg p-4">
+      <h2 class="text-cyan-300 font-semibold mb-2">カラーマップ (u 濃度)</h2>
+      <canvas id="legendCanvas" width="200" height="24" class="w-full rounded" aria-label="カラーマップ凡例"></canvas>
+      <div class="flex justify-between text-xs text-gray-400 mt-1">
+        <span>0 (低)</span><span>0.5 (中)</span><span>1 (高)</span>
+      </div>
+    </div>
+
+    <!-- Explanation -->
+    <div class="bg-gray-800 rounded-lg p-4 text-sm text-gray-300">
+      <h2 class="text-cyan-300 font-semibold mb-2">BZ反応とは</h2>
+      <p class="mb-2">Belousov-Zhabotinsky反応は非平衡化学系で観測される時空間的な自己組織化現象です。</p>
+      <ul class="list-disc list-inside space-y-1 text-gray-400">
+        <li><span class="text-yellow-300">ε</span>: 小さいほど励起しやすく波が速い</li>
+        <li><span class="text-yellow-300">f</span>: 大きいほど抑制が強く定常波に近づく</li>
+        <li><span class="text-yellow-300">D_v/D_u</span>: 拡散比が螺旋波の安定性を決める</li>
+      </ul>
+      <p class="mt-2 text-cyan-400">クリックで新しい興奮中心を追加</p>
+      <p class="mt-1">オレゴネーター (Oregonator) モデルで数値積分</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const GRID = 200;
+const DU = 1.0;
+let q = 0.002;
+
+const canvas = document.getElementById('bzCanvas');
+const ctx = canvas.getContext('2d');
+const legendCanvas = document.getElementById('legendCanvas');
+const legendCtx = legendCanvas.getContext('2d');
+
+let u = new Float32Array(GRID * GRID);
+let v = new Float32Array(GRID * GRID);
+let uNext = new Float32Array(GRID * GRID);
+let vNext = new Float32Array(GRID * GRID);
+
+let epsilon = 0.10;
+let fParam = 1.40;
+let diffRatio = 0.60;
+let speed = 3;
+let paused = false;
+let stepCount = 0;
+let lastTime = performance.now();
+let frameCount = 0;
+
+// Color lookup table
+const colorLUT = new Uint8ClampedArray(256 * 4);
+function buildLUT() {
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let r, g, b;
+    // Blue -> Cyan -> Yellow -> Red -> Blue cycle
+    if (t < 0.25) {
+      const s = t / 0.25;
+      r = 0; g = Math.round(s * 255); b = 255;
+    } else if (t < 0.5) {
+      const s = (t - 0.25) / 0.25;
+      r = Math.round(s * 255); g = 255; b = Math.round((1 - s) * 255);
+    } else if (t < 0.75) {
+      const s = (t - 0.5) / 0.25;
+      r = 255; g = Math.round((1 - s) * 255); b = 0;
+    } else {
+      const s = (t - 0.75) / 0.25;
+      r = Math.round((1 - s) * 255); g = 0; b = Math.round(s * 255);
+    }
+    colorLUT[i * 4] = r;
+    colorLUT[i * 4 + 1] = g;
+    colorLUT[i * 4 + 2] = b;
+    colorLUT[i * 4 + 3] = 255;
+  }
+}
+buildLUT();
+
+function drawLegend() {
+  const imgData = legendCtx.createImageData(200, 24);
+  for (let x = 0; x < 200; x++) {
+    const ci = Math.floor(x / 200 * 255);
+    for (let y = 0; y < 24; y++) {
+      const idx = (y * 200 + x) * 4;
+      imgData.data[idx] = colorLUT[ci * 4];
+      imgData.data[idx + 1] = colorLUT[ci * 4 + 1];
+      imgData.data[idx + 2] = colorLUT[ci * 4 + 2];
+      imgData.data[idx + 3] = 255;
+    }
+  }
+  legendCtx.putImageData(imgData, 0, 0);
+}
+drawLegend();
+
+function randomInit() {
+  for (let i = 0; i < GRID * GRID; i++) {
+    u[i] = Math.random() * 0.1;
+    v[i] = Math.random() * 0.1;
+  }
+  // Add a few excitation centers
+  for (let k = 0; k < 5; k++) {
+    const cx = Math.floor(Math.random() * GRID);
+    const cy = Math.floor(Math.random() * GRID);
+    addExcitation(cx, cy);
+  }
+}
+
+function addExcitation(cx, cy) {
+  const r = 5;
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const nx = (cx + dx + GRID) % GRID;
+      const ny = (cy + dy + GRID) % GRID;
+      if (dx * dx + dy * dy <= r * r) {
+        u[ny * GRID + nx] = 0.9 + Math.random() * 0.1;
+        v[ny * GRID + nx] = 0.1;
+      }
+    }
+  }
+}
+
+function laplacian(arr, x, y) {
+  const idx = y * GRID + x;
+  const xp = y * GRID + ((x + 1) % GRID);
+  const xm = y * GRID + ((x - 1 + GRID) % GRID);
+  const yp = ((y + 1) % GRID) * GRID + x;
+  const ym = ((y - 1 + GRID) % GRID) * GRID + x;
+  return arr[xp] + arr[xm] + arr[yp] + arr[ym] - 4 * arr[idx];
+}
+
+const dt = 0.05;
+
+function step() {
+  const DV = DU * diffRatio;
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      const idx = y * GRID + x;
+      const ui = u[idx];
+      const vi = v[idx];
+      const lapU = laplacian(u, x, y);
+      const lapV = laplacian(v, x, y);
+
+      const denom = ui + q;
+      const fTerm = (denom !== 0) ? fParam * vi * (ui - q) / denom : 0;
+      const dudt = (1 / epsilon) * (ui - ui * ui - fTerm) + DU * lapU;
+      const dvdt = ui - vi + DV * lapV;
+
+      uNext[idx] = Math.max(0, Math.min(1, ui + dt * dudt));
+      vNext[idx] = Math.max(0, Math.min(1, vi + dt * dvdt));
+    }
+  }
+  // Swap
+  let tmp = u; u = uNext; uNext = tmp;
+  tmp = v; v = vNext; vNext = tmp;
+}
+
+const imgData = ctx.createImageData(GRID, GRID);
+
+function render() {
+  for (let i = 0; i < GRID * GRID; i++) {
+    const ci = Math.min(255, Math.floor(u[i] * 255));
+    imgData.data[i * 4] = colorLUT[ci * 4];
+    imgData.data[i * 4 + 1] = colorLUT[ci * 4 + 1];
+    imgData.data[i * 4 + 2] = colorLUT[ci * 4 + 2];
+    imgData.data[i * 4 + 3] = 255;
+  }
+  // Put scaled up to 400x400
+  const offscreen = new OffscreenCanvas(GRID, GRID);
+  const offCtx = offscreen.getContext('2d');
+  offCtx.putImageData(imgData, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(offscreen, 0, 0, 400, 400);
+}
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  frameCount++;
+  const elapsed = now - lastTime;
+  if (elapsed >= 1000) {
+    document.getElementById('fpsDisplay').textContent = `FPS: ${Math.round(frameCount * 1000 / elapsed)}`;
+    frameCount = 0;
+    lastTime = now;
+  }
+  if (!paused) {
+    for (let s = 0; s < speed; s++) {
+      step();
+      stepCount++;
+    }
+    document.getElementById('stepDisplay').textContent = `Step: ${stepCount}`;
+    render();
+  }
+}
+
+// Controls
+document.getElementById('epsilon').addEventListener('input', e => {
+  epsilon = parseFloat(e.target.value);
+  document.getElementById('epsilonVal').textContent = epsilon.toFixed(2);
+});
+document.getElementById('fParam').addEventListener('input', e => {
+  fParam = parseFloat(e.target.value);
+  document.getElementById('fVal').textContent = fParam.toFixed(2);
+});
+document.getElementById('diffRatio').addEventListener('input', e => {
+  diffRatio = parseFloat(e.target.value);
+  document.getElementById('diffVal').textContent = diffRatio.toFixed(2);
+});
+document.getElementById('speed').addEventListener('input', e => {
+  speed = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = speed;
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  stepCount = 0;
+  randomInit();
+});
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+});
+
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / rect.width * GRID);
+  const y = Math.floor((e.clientY - rect.top) / rect.height * GRID);
+  addExcitation(x, y);
+});
+
+randomInit();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
